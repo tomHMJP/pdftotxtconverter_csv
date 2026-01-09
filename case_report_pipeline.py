@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import datetime as _dt
 import re
 import shutil
 import subprocess
@@ -67,6 +66,8 @@ _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.\w+\b")
 _URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 _DOI_URL_RE = re.compile(r"^https?://doi\.org/\S+$", re.IGNORECASE)
 _PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
+_CAPTION_START_RE = re.compile(r"^(?:figure|table)\s*\d+\s*[.:]\s+\S+", re.IGNORECASE)
+_CASE_START_RE = re.compile(r"\b(?:A|An)\s+\d{1,3}\s*[-–]?\s*year[- ]old\b", re.IGNORECASE)
 
 _HYPHEN_CHARS = "-\u2010\u2011\u00ad"
 _HYPHEN_LINEBREAK_RE = re.compile(rf"(?P<left>[A-Za-z0-9]{{1,}})[{_HYPHEN_CHARS}]\n\s*(?P<right>[A-Za-z0-9]{{1,}})")
@@ -192,6 +193,94 @@ def _is_heading_line(line: str) -> bool:
     return False
 
 
+def _is_layout_noise_line(line: str) -> bool:
+    lowered = line.strip().lower()
+    if not lowered:
+        return False
+    if lowered.startswith("corresponding author:"):
+        return True
+    if lowered.startswith(("received:", "accepted:", "copyright")):
+        return True
+    if lowered.startswith("this is an open access journal distributed"):
+        return True
+    if "creativecommons.org" in lowered or "creative commons" in lowered:
+        return True
+    return False
+
+
+def _looks_like_repeated_header_line(line: str) -> bool:
+    if _DOI_URL_RE.match(line) or _URL_RE.match(line):
+        return True
+    if _PAGE_NUMBER_RE.match(line):
+        return True
+    match = _CITATION_RE.fullmatch(line)
+    if match and len(line) <= 120 and not line.rstrip().endswith("."):
+        return True
+    return False
+
+
+def _should_resume_after_caption(line: str, paragraph: list[str], previous_text: str) -> bool:
+    lowered = line.strip().lower()
+    if not lowered:
+        return False
+    if _CASE_START_RE.match(line):
+        return True
+    if lowered.startswith(("the patient", "he ", "she ", "they ", "we ")):
+        return True
+    tail = paragraph[-1].strip() if paragraph else previous_text.strip()
+    if tail and re.search(r"(?i)\b(in|of|to|for|with|without|by|as|at|from|during|on)\s*$", tail) and re.match(
+        r"(?i)^(the|a|an)\b", lowered
+    ):
+        return True
+    return False
+
+
+def _should_join_soft_break(prev: str, nxt: str) -> bool:
+    prev = prev.strip()
+    nxt = nxt.strip()
+    if not prev or not nxt:
+        return False
+    if _is_heading_line(prev) or _is_heading_line(nxt):
+        return False
+    if prev.endswith((".", "!", "?", ":", ";")):
+        return False
+    if re.match(r"^[a-z]", nxt):
+        return True
+    if re.search(r"(?i)\b(in|of|to|for|with|without|by|as|at|from|during|on)\s*$", prev) and re.match(
+        r"(?i)^(the|a|an)\b", nxt
+    ):
+        return True
+    return False
+
+
+def _join_soft_paragraph_breaks(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line == "" and out and i + 1 < len(lines) and lines[i + 1] != "":
+            prev = out[-1]
+            nxt = lines[i + 1]
+            if _should_join_soft_break(prev, nxt):
+                out[-1] = f"{prev.rstrip()} {nxt.lstrip()}".strip()
+                i += 2
+                continue
+        out.append(line)
+        i += 1
+
+    deduped: list[str] = []
+    blank_pending = False
+    for line in out:
+        if line == "":
+            blank_pending = True
+            continue
+        if blank_pending and deduped:
+            deduped.append("")
+        blank_pending = False
+        deduped.append(line)
+    return deduped
+
+
 def clean_extracted_text(text: str) -> str:
     text = _normalize_text(text)
     text = text.replace("\u00a0", " ").replace("\u3000", " ")
@@ -200,11 +289,20 @@ def clean_extracted_text(text: str) -> str:
     text = _fix_hyphen_linebreaks(text)
 
     raw_lines = [line.rstrip() for line in text.split("\n")]
+    counts: dict[str, int] = {}
+    for raw in raw_lines:
+        normalized = re.sub(r"\s+", " ", raw.strip())
+        if not normalized:
+            continue
+        counts[normalized] = counts.get(normalized, 0) + 1
 
     out_lines: list[str] = []
     paragraph: list[str] = []
+    last_emitted = ""
     in_front_matter = True
     front_matter_budget = 80
+    in_caption_block = False
+    caption_budget = 0
 
     def _front_matter_ended_by_heading(line: str) -> bool:
         normalized = re.sub(r"\s+", " ", line.strip()).strip(":：").lower()
@@ -219,12 +317,14 @@ def clean_extracted_text(text: str) -> str:
 
     def flush_paragraph() -> None:
         nonlocal paragraph
+        nonlocal last_emitted
         if not paragraph:
             return
         merged = " ".join(part.strip() for part in paragraph if part.strip())
         merged = re.sub(r"\s+", " ", merged).strip()
         if merged:
             out_lines.append(merged)
+            last_emitted = merged
         paragraph = []
 
     def add_blank_line() -> None:
@@ -233,9 +333,40 @@ def clean_extracted_text(text: str) -> str:
 
     for raw_line in raw_lines:
         line = raw_line.strip()
+        line = re.sub(r"\s+", " ", line).strip()
+
+        if in_caption_block:
+            if not line:
+                in_caption_block = False
+                continue
+            if _CAPTION_START_RE.match(line):
+                caption_budget = 30
+                continue
+            if _should_resume_after_caption(line, paragraph, last_emitted):
+                in_caption_block = False
+            else:
+                caption_budget -= 1
+                if caption_budget <= 0:
+                    in_caption_block = False
+                continue
+
         if not line:
             flush_paragraph()
             add_blank_line()
+            continue
+
+        if _PAGE_NUMBER_RE.match(line):
+            continue
+
+        if _is_layout_noise_line(line):
+            continue
+
+        if not in_front_matter and counts.get(line, 0) >= 2 and _looks_like_repeated_header_line(line):
+            continue
+
+        if not in_front_matter and _CAPTION_START_RE.match(line):
+            in_caption_block = True
+            caption_budget = 30
             continue
 
         if _URL_RE.match(line) or _DOI_URL_RE.match(line) or _PAGE_NUMBER_RE.match(line):
@@ -274,6 +405,8 @@ def clean_extracted_text(text: str) -> str:
             cleaned.append("")
         blank_pending = False
         cleaned.append(line)
+
+    cleaned = _join_soft_paragraph_breaks(cleaned)
 
     return "\n".join(cleaned).strip() + "\n"
 
@@ -731,8 +864,12 @@ def extract_structured_sections(clean_text: str) -> dict[str, str]:
                     else:
                         discussion = main_text.strip()
                         case_presentation = ""
-        if not case_presentation:
-            case_presentation = main_text.strip()
+    if not case_presentation:
+        case_presentation = main_text.strip()
+
+    match = _CASE_START_RE.search(case_presentation)
+    if match:
+        case_presentation = case_presentation[match.start() :].lstrip()
 
     return {
         "abstract": abstract,
@@ -781,6 +918,17 @@ def write_csv(rows: list[dict[str, str]], csv_path: Path) -> None:
             writer.writerow(row)
 
 
+def _utc_now_iso() -> str:
+    ts = time.time()
+    seconds = int(ts)
+    micros = int(round((ts - seconds) * 1_000_000))
+    if micros >= 1_000_000:
+        seconds += 1
+        micros = 0
+    base = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(seconds))
+    return f"{base}.{micros:06d}Z"
+
+
 def _pdf_states(pdfs: list[Path]) -> list[tuple[str, int, int]]:
     states: list[tuple[str, int, int]] = []
     for pdf_path in pdfs:
@@ -804,7 +952,7 @@ def process_pdfs(
 
     txt_out.mkdir(parents=True, exist_ok=True)
 
-    extracted_at = _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
+    extracted_at = _utc_now_iso()
     rows: list[dict[str, str]] = []
 
     for pdf_path in pdfs:
