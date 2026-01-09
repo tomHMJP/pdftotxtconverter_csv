@@ -64,6 +64,90 @@ _CITATION_RE = re.compile(
 _ARTICLE_TYPE_HINT_RE = re.compile(r"\b(case report|short case report)\b", re.IGNORECASE)
 _FRONT_MATTER_STOP_RE = re.compile(r"^(abstract|introduction|background)\b", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.\w+\b")
+_URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+_DOI_URL_RE = re.compile(r"^https?://doi\.org/\S+$", re.IGNORECASE)
+_PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
+
+_HYPHEN_CHARS = "-\u2010\u2011\u00ad"
+_HYPHEN_LINEBREAK_RE = re.compile(rf"(?P<left>[A-Za-z0-9]{{1,}})[{_HYPHEN_CHARS}]\n\s*(?P<right>[A-Za-z0-9]{{1,}})")
+_KEEP_HYPHEN_LEFT = {
+    "life",
+    "long",
+    "short",
+    "high",
+    "low",
+    "well",
+}
+_COMMON_SUFFIXES = {
+    "a",
+    "able",
+    "al",
+    "ally",
+    "ation",
+    "ations",
+    "ed",
+    "er",
+    "ers",
+    "es",
+    "est",
+    "ful",
+    "ically",
+    "ic",
+    "ics",
+    "ing",
+    "ion",
+    "ions",
+    "ism",
+    "ist",
+    "ists",
+    "ity",
+    "ities",
+    "ive",
+    "ize",
+    "ized",
+    "izes",
+    "izing",
+    "less",
+    "ly",
+    "ment",
+    "ments",
+    "ness",
+    "ous",
+    "s",
+    "tion",
+    "tions",
+    # medical-ish suffixes
+    "emia",
+    "itis",
+    "logy",
+    "mography",
+    "opathy",
+    "osis",
+    "scopy",
+    "titis",
+    "uria",
+}
+
+_KNOWN_HEADINGS = {
+    "abstract",
+    "acknowledgments",
+    "acknowledgements",
+    "article information",
+    "author contributions",
+    "background",
+    "case presentation",
+    "case report",
+    "conclusion",
+    "conflicts of interest",
+    "discussion",
+    "figure captions",
+    "introduction",
+    "keywords",
+    "key words",
+    "main text",
+    "references",
+    "results",
+}
 
 
 def _normalize_text(text: str) -> str:
@@ -76,6 +160,122 @@ def _normalize_text(text: str) -> str:
 def _extract_doi(text: str) -> str:
     match = _DOI_RE.search(text)
     return match.group(0) if match else ""
+
+def _fix_hyphen_linebreaks(text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        left = match.group("left")
+        right = match.group("right")
+        left_lower = left.lower()
+        right_lower = right.lower()
+
+        if any(ch.isdigit() for ch in left):
+            return f"{left}-{right}"
+        if left_lower in _KEEP_HYPHEN_LEFT:
+            return f"{left}-{right}"
+        if right_lower in _COMMON_SUFFIXES:
+            return f"{left}{right}"
+        return f"{left}{right}"
+
+    return _HYPHEN_LINEBREAK_RE.sub(repl, text)
+
+
+def _is_heading_line(line: str) -> bool:
+    normalized = re.sub(r"\s+", " ", line.strip()).strip(":：").lower()
+    if not normalized:
+        return False
+    if normalized in _KNOWN_HEADINGS:
+        return True
+    if normalized.startswith(("figure ", "table ")):
+        return True
+    if len(normalized) <= 30 and normalized.isupper():
+        return True
+    return False
+
+
+def clean_extracted_text(text: str) -> str:
+    text = _normalize_text(text)
+    text = text.replace("\u00a0", " ").replace("\u3000", " ")
+    # Some extractors emit control characters for symbols (e.g., "≥").
+    text = text.replace("\x02", "≥")
+    text = _fix_hyphen_linebreaks(text)
+
+    raw_lines = [line.rstrip() for line in text.split("\n")]
+
+    out_lines: list[str] = []
+    paragraph: list[str] = []
+    in_front_matter = True
+    front_matter_budget = 80
+
+    def _front_matter_ended_by_heading(line: str) -> bool:
+        normalized = re.sub(r"\s+", " ", line.strip()).strip(":：").lower()
+        return normalized in {
+            "abstract",
+            "introduction",
+            "background",
+            "case presentation",
+            "case report",
+            "main text",
+        }
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if not paragraph:
+            return
+        merged = " ".join(part.strip() for part in paragraph if part.strip())
+        merged = re.sub(r"\s+", " ", merged).strip()
+        if merged:
+            out_lines.append(merged)
+        paragraph = []
+
+    def add_blank_line() -> None:
+        if out_lines and out_lines[-1] != "":
+            out_lines.append("")
+
+    for raw_line in raw_lines:
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            add_blank_line()
+            continue
+
+        if _URL_RE.match(line) or _DOI_URL_RE.match(line) or _PAGE_NUMBER_RE.match(line):
+            flush_paragraph()
+            out_lines.append(line)
+            continue
+
+        if _is_heading_line(line):
+            flush_paragraph()
+            add_blank_line()
+            out_lines.append(line)
+            add_blank_line()
+            if in_front_matter and _front_matter_ended_by_heading(line):
+                in_front_matter = False
+            continue
+
+        if in_front_matter:
+            front_matter_budget -= 1
+            if front_matter_budget <= 0:
+                in_front_matter = False
+            flush_paragraph()
+            out_lines.append(re.sub(r"\s+", " ", line).strip())
+            continue
+
+        paragraph.append(line)
+
+    flush_paragraph()
+
+    cleaned: list[str] = []
+    blank_pending = False
+    for line in out_lines:
+        if line == "":
+            blank_pending = True
+            continue
+        if blank_pending and cleaned:
+            cleaned.append("")
+        blank_pending = False
+        cleaned.append(line)
+
+    return "\n".join(cleaned).strip() + "\n"
 
 
 def _looks_like_affiliation_line(line: str) -> bool:
@@ -274,6 +474,96 @@ def _find_authors(lines: list[str], title: str) -> str:
 
     return ""
 
+def _extract_first_author(authors: str) -> str:
+    authors = re.sub(r"\s+", " ", authors).strip()
+    if not authors:
+        return ""
+    match = re.split(r"\s+(?:and|&)\s+", authors, maxsplit=1, flags=re.IGNORECASE)
+    if match and match[0] and match[0] != authors:
+        return match[0].strip().strip(",;")
+    if ";" in authors:
+        return authors.split(";", 1)[0].strip().strip(",;")
+    if "," in authors:
+        return authors.split(",", 1)[0].strip().strip(",;")
+    return authors.strip().strip(",;")
+
+
+def _parse_affiliations_map(affiliations: str) -> dict[int, str]:
+    mapping: dict[int, str] = {}
+    for part in affiliations.split("|"):
+        part = part.strip()
+        match = re.match(r"^(?P<num>\d+)\)\s+(?P<rest>.+)$", part)
+        if not match:
+            continue
+        mapping[int(match.group("num"))] = match.group("rest").strip()
+    return mapping
+
+
+def _extract_first_author_aff_nums(text: str, title: str, first_author: str) -> list[int]:
+    if not first_author:
+        return []
+    text = _normalize_text(text)
+    lines = [line.strip() for line in text.split("\n")]
+
+    title_idx = -1
+    for i, line in enumerate(lines[:300]):
+        if title and line.strip() == title.strip():
+            title_idx = i
+            break
+
+    author_block_lines: list[str] = []
+    if title_idx >= 0:
+        for line in lines[title_idx + 1 : title_idx + 30]:
+            if not line:
+                continue
+            lowered = line.lower().strip(":：")
+            if lowered in _KNOWN_HEADINGS:
+                break
+            if re.match(r"^\d+\)\s+.+", line) and any(
+                k in lowered for k in ["department", "hospital", "university", "institute", "centre", "center", "clinic"]
+            ):
+                break
+            author_block_lines.append(line)
+
+    search_text = " ".join(author_block_lines) if author_block_lines else " ".join(lines[:200])
+    search_text = _EMAIL_RE.sub("", search_text)
+    search_text = re.sub(r"\s+", " ", search_text).strip()
+
+    pattern = re.compile(
+        rf"(?i){re.escape(first_author)}\s*(?P<nums>(?:\d+\s*\)?\s*)+)"
+    )
+    match = pattern.search(search_text)
+    if not match:
+        return []
+    nums = [int(n) for n in re.findall(r"\d+", match.group("nums"))]
+    deduped: list[int] = []
+    for n in nums:
+        if n not in deduped:
+            deduped.append(n)
+    return deduped
+
+
+def _infer_specialties_from_affiliations(affiliations_text: str) -> str:
+    specialties: list[str] = []
+    for aff in [a.strip() for a in affiliations_text.split("|") if a.strip()]:
+        match = re.search(r"(?i)\b(?:Department|Division|Section|Unit)\s+of\s+([^,]+)", aff)
+        if match:
+            specialties.append(match.group(1).strip())
+            continue
+        match = re.search(r"(?i)\b([^,]+?)\s+Department\b", aff)
+        if match:
+            specialties.append(match.group(1).strip())
+            continue
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for spec in specialties:
+        key = spec.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(spec)
+    return " | ".join(deduped)
+
 
 def _find_affiliations(lines: list[str]) -> str:
     collected: list[str] = []
@@ -367,6 +657,90 @@ def extract_metadata(text: str) -> dict[str, str]:
         "doi": doi,
     }
 
+def extract_structured_sections(clean_text: str) -> dict[str, str]:
+    clean_text = _normalize_text(clean_text)
+    lines = [line.rstrip() for line in clean_text.split("\n")]
+
+    def norm(line: str) -> str:
+        return re.sub(r"\s+", " ", line.strip()).strip(":：").lower()
+
+    def find_heading(names: set[str]) -> int:
+        for i, line in enumerate(lines):
+            if norm(line) in names:
+                return i
+        return -1
+
+    def collect_between(start_names: set[str], end_names: set[str]) -> str:
+        start = find_heading(start_names)
+        if start < 0:
+            return ""
+        buf: list[str] = []
+        for line in lines[start + 1 :]:
+            if norm(line) in end_names:
+                break
+            buf.append(line)
+        return _normalize_section_text(buf)
+
+    def slice_main_text() -> str:
+        start = find_heading({"keywords", "key words"})
+        if start >= 0:
+            start += 1
+        else:
+            start = 0
+        end = find_heading({"references"})
+        if end < 0:
+            end = len(lines)
+        return _normalize_section_text(lines[start:end])
+
+    def _normalize_section_text(section_lines: list[str]) -> str:
+        paragraphs: list[str] = []
+        cur: list[str] = []
+        for raw in section_lines:
+            line = raw.strip()
+            if not line:
+                if cur:
+                    paragraphs.append(re.sub(r"\s+", " ", " ".join(cur)).strip())
+                    cur = []
+                continue
+            cur.append(line)
+        if cur:
+            paragraphs.append(re.sub(r"\s+", " ", " ".join(cur)).strip())
+        return "\n\n".join(p for p in paragraphs if p)
+
+    abstract = collect_between({"abstract"}, {"keywords", "key words", "introduction", "background", "references"})
+    introduction = collect_between({"introduction", "background"}, {"case presentation", "case report", "discussion", "references"})
+
+    discussion = collect_between({"discussion"}, {"references"})
+    case_presentation = collect_between({"case presentation", "case report"}, {"discussion", "references"})
+
+    if not (case_presentation and discussion):
+        main_text = slice_main_text()
+        if not discussion:
+            citation_match = re.search(r"\[\d+\]", main_text)
+            if citation_match:
+                split_at = citation_match.start()
+                paragraph_start = main_text.rfind("\n\n", 0, split_at)
+                if paragraph_start != -1:
+                    discussion = main_text[paragraph_start + 2 :].strip()
+                    case_presentation = main_text[:paragraph_start].strip()
+                else:
+                    sentence_start = main_text.rfind(". ", 0, split_at)
+                    if sentence_start != -1:
+                        discussion = main_text[sentence_start + 2 :].strip()
+                        case_presentation = main_text[: sentence_start + 1].strip()
+                    else:
+                        discussion = main_text.strip()
+                        case_presentation = ""
+        if not case_presentation:
+            case_presentation = main_text.strip()
+
+    return {
+        "abstract": abstract,
+        "introduction": introduction,
+        "case_presentation": case_presentation,
+        "discussion": discussion,
+    }
+
 
 def write_csv(rows: list[dict[str, str]], csv_path: Path) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -380,10 +754,17 @@ def write_csv(rows: list[dict[str, str]], csv_path: Path) -> None:
         "issue",
         "pages",
         "authors",
+        "first_author",
+        "first_author_affiliations",
+        "first_author_specialties",
         "affiliations",
         "doi",
         "extracted_at",
         "extractor",
+        "abstract",
+        "introduction",
+        "case_presentation",
+        "discussion",
         "full_text",
     ]
     # Use UTF-8 with BOM so Excel (JP) opens without mojibake (Shift-JIS mis-detection).
@@ -432,23 +813,39 @@ def process_pdfs(
         if out_path.exists() and not force:
             if not csv_out:
                 continue
-            text = out_path.read_text(encoding="utf-8-sig", errors="replace")
+            raw_text = out_path.read_text(encoding="utf-8-sig", errors="replace")
             extractor = "txt-cache"
         else:
-            text, extractor = extract_text(pdf_path)
+            raw_text, extractor = extract_text(pdf_path)
             # UTF-8 with BOM improves compatibility with apps that otherwise assume Shift-JIS.
-            out_path.write_text(text, encoding="utf-8-sig", newline="\n")
+            cleaned_text = clean_extracted_text(raw_text)
+            out_path.write_text(cleaned_text, encoding="utf-8-sig", newline="\n")
             wrote_txt = True
 
-        metadata = extract_metadata(text)
+        cleaned_text = clean_extracted_text(raw_text)
+        metadata = extract_metadata(cleaned_text)
+        sections = extract_structured_sections(cleaned_text)
+
+        first_author = _extract_first_author(metadata.get("authors", ""))
+        aff_map = _parse_affiliations_map(metadata.get("affiliations", ""))
+        first_aff_nums = _extract_first_author_aff_nums(cleaned_text, metadata.get("paper_title", ""), first_author)
+        if not first_aff_nums and aff_map:
+            first_aff_nums = [sorted(aff_map.keys())[0]]
+        first_affs = " | ".join(aff_map.get(n, "").strip() for n in first_aff_nums if aff_map.get(n, "").strip())
+        first_specs = _infer_specialties_from_affiliations(first_affs)
+
         rows.append(
             {
                 "pdf_path": str(pdf_path),
                 "txt_path": str(out_path),
                 "extracted_at": extracted_at,
                 "extractor": extractor,
-                "full_text": text,
+                "full_text": cleaned_text,
                 **metadata,
+                "first_author": first_author,
+                "first_author_affiliations": first_affs,
+                "first_author_specialties": first_specs,
+                **sections,
             }
         )
         if wrote_txt:

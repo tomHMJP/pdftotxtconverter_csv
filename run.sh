@@ -13,4 +13,4 @@ exec "$SCRIPT_DIR/.venv/bin/python" case_report_pipeline.py \
   --input input_pdfs \
   --txt-out output/txt \
   --csv-out output/case_reports.csv \
-  ${1+"$@"}
+  "$@"

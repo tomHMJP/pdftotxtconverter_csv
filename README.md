@@ -67,8 +67,14 @@ PDFを `input_pdfs/` に追加するたびに自動で更新したい場合:
 - `journal_name`（雑誌名）
 - `volume`（巻）, `issue`（号）, `year`, `pages`
 - `authors`（著者）
-- `affiliations`（所属 / specialty）
+- `first_author`（筆頭著者）
+- `first_author_affiliations`（筆頭著者の所属）
+- `first_author_specialties`（所属から推測した診療科名）
+- `affiliations`（所属）
+- `abstract`, `introduction`, `case_presentation`, `discussion`（章ごとの本文）
 - `full_text`（txt全文）
+
+txt/CSV の `full_text` は、PDF由来の「無駄な改行」や `suggest-\ning` のような改行ハイフン分割を可能な範囲で整形してから格納します。
 
 メタデータは **抽出テキストからのルールベース推定** のため、レイアウトや雑誌ごとの差で誤りが出ることがあります（必要なら後続で精度向上できます）。
 
