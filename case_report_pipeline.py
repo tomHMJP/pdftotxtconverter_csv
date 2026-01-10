@@ -178,6 +178,41 @@ def _normalize_text(text: str) -> str:
     return text
 
 
+def _fix_common_mojibake(text: str) -> str:
+    # Some PDFs (font maps) mis-extract the multiplication sign "×" as "©".
+    # Fix only in numeric contexts to avoid touching copyright marks.
+    text = re.sub(r"(?<=\d)\s*©\s*(?=\d)", " × ", text)
+
+    def replace_multiply_symbol(match: re.Match[str]) -> str:
+        prefix = match.group("prefix")
+        number = match.group("number")
+        if len(number) == 4 and number.startswith(("19", "20")):
+            return match.group(0)
+        return f"{prefix}×{number}"
+
+    text = re.sub(r"(?P<prefix>[\s(,])©\s*(?P<number>\d{1,4})", replace_multiply_symbol, text)
+    def replace_leading_multiply_symbol(match: re.Match[str]) -> str:
+        number = match.group("number")
+        if len(number) == 4 and number.startswith(("19", "20")):
+            return match.group(0)
+        return f"×{number}"
+
+    text = re.sub(r"^©\s*(?P<number>\d{1,4})", replace_leading_multiply_symbol, text)
+
+    # Common lab notation: "×10^3/µL" sometimes becomes "× 103/µL" (caret lost).
+    text = re.sub(
+        r"×\s*10\s*(?P<exp>\d)\s*/\s*(?P<unit>[µμ]L)\b",
+        r"× 10^\g<exp>/\g<unit>",
+        text,
+    )
+    text = re.sub(
+        r"×\s*10\s*(?P<exp>\d)\s*/\s*(?P<unit>L)\b",
+        r"× 10^\g<exp>/\g<unit>",
+        text,
+    )
+    return text
+
+
 def _extract_doi(text: str) -> str:
     match = _DOI_RE.search(text)
     return match.group(0) if match else ""
@@ -350,6 +385,7 @@ def clean_extracted_text(text: str) -> str:
     text = text.replace("\u00a0", " ").replace("\u3000", " ")
     # Some extractors emit control characters for symbols (e.g., "≥").
     text = text.replace("\x02", "≥")
+    text = _fix_common_mojibake(text)
     text = _fix_hyphen_linebreaks(text)
 
     raw_lines = [line.rstrip() for line in text.split("\n")]
@@ -599,6 +635,7 @@ def extract_figure_legends(text: str) -> str:
     text = _normalize_text(text)
     text = text.replace("\u00a0", " ").replace("\u3000", " ")
     text = text.replace("\x02", "≥")
+    text = _fix_common_mojibake(text)
     text = _fix_hyphen_linebreaks(text)
 
     raw_lines = [line.rstrip() for line in text.split("\n")]
@@ -1568,6 +1605,13 @@ def _strip_leading_connectors(text: str) -> str:
         text = updated
 
 
+def _normalize_dx_key(dx: str) -> str:
+    dx = dx.lower()
+    dx = re.sub(r"[^a-z0-9]+", " ", dx)
+    dx = re.sub(r"\s+", " ", dx).strip()
+    return dx
+
+
 def _extract_preceding_phrase(text: str, match_start: int) -> str:
     boundaries = [
         text.rfind("\n", 0, match_start),
@@ -1656,6 +1700,24 @@ def extract_diagnoses(sections: dict[str, str]) -> dict[str, str]:
         and len(dx) <= 240
     ]
     final = _dedupe_keep_order(final)
+
+    if tentative and final:
+        final_keys = [_normalize_dx_key(dx) for dx in final]
+        filtered: list[str] = []
+        for dx in tentative:
+            key = _normalize_dx_key(dx)
+            if not key:
+                continue
+            overlap = any(
+                key == other
+                or (len(key) >= 10 and key in other)
+                or (len(other) >= 10 and other in key)
+                for other in final_keys
+            )
+            if overlap:
+                continue
+            filtered.append(dx)
+        tentative = filtered
 
     return {
         "tentative_diagnoses": " | ".join(tentative),

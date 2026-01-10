@@ -38,6 +38,15 @@ References
         self.assertNotIn("suggest-\n", cleaned)
         self.assertNotIn("re-\n", cleaned)
 
+    def test_cleanup_fixes_times_symbol_mojibake(self) -> None:
+        raw = """Case Presentation
+Laboratory data showed: red blood cell count 251 © 104/µL, platelet count 140 © 103/µL.
+References
+1. Example.
+"""
+        cleaned = clean_extracted_text(raw)
+        self.assertIn("red blood cell count 251 × 10^4/µL, platelet count 140 × 10^3/µL.", cleaned)
+
     def test_cleanup_keeps_front_matter_lines_separate(self) -> None:
         raw = """JOURNAL OF TEST
 Short Case Report

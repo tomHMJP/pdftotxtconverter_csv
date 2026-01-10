@@ -39,7 +39,14 @@ References
         )
         self.assertNotIn("pg/mL", legends)
 
+    def test_fixes_times_symbol_mojibake_in_legend(self) -> None:
+        raw = """Figure 1. Light microscopy (©40).
+Case Report
+A 72-year-old male was referred.
+"""
+        legends = extract_figure_legends(raw)
+        self.assertIn("Figure 1. Light microscopy (×40).", legends)
+
 
 if __name__ == "__main__":
     unittest.main()
-

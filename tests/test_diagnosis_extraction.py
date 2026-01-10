@@ -37,7 +37,20 @@ class TestDiagnosisExtraction(unittest.TestCase):
         self.assertIn("proximal deep vein thrombosis", dx.get("final_diagnoses", "").lower())
         self.assertIn("pulmonary embolism", dx.get("final_diagnoses", "").lower())
 
+    def test_tentative_excludes_overlapping_final(self) -> None:
+        sections = {
+            "case_presentation": (
+                "Although aspiration pneumonia was considered as a possible diagnosis, "
+                "acute cholangitis due to a common bile duct stone was suspected. "
+                "The patient was diagnosed with acute cholangitis due to a common bile duct stone."
+            ),
+            "abstract": "",
+            "discussion": "",
+        }
+        dx = extract_diagnoses(sections)
+        self.assertIn("aspiration pneumonia", dx.get("tentative_diagnoses", "").lower())
+        self.assertNotIn("acute cholangitis due to a common bile duct stone", dx.get("tentative_diagnoses", "").lower())
+
 
 if __name__ == "__main__":
     unittest.main()
-
