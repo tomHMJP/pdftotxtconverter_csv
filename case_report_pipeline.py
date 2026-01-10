@@ -60,6 +60,10 @@ _CITATION_RE = re.compile(
     r"(?P<journal>.+?)\s+(?P<year>20\d{2})\s*[:;]\s*(?P<volume>\d+)\s*\((?P<issue>[^)]+)\)\s*[:;]\s*(?P<pages>[A-Za-z]?\d+\s*[-–]\s*[A-Za-z]?\d+)",
     re.IGNORECASE,
 )
+_VOL_NO_PAGES_RE = re.compile(
+    r"(?P<journal>.+)\s+(?P<year>20\d{2})\s*,?\s*vol\.?\s*(?P<volume>\d+)\s*,?\s*no\.?\s*(?P<issue>\d+)(?:\s*,?\s*p(?:p)?\.?\s*(?P<pages>\d+\s*[-–]\s*\d+))?",
+    re.IGNORECASE,
+)
 _ARTICLE_TYPE_HINT_RE = re.compile(r"\b(case report|short case report)\b", re.IGNORECASE)
 _FRONT_MATTER_STOP_RE = re.compile(r"^(abstract|introduction|background)\b", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.\w+\b")
@@ -219,6 +223,34 @@ def _looks_like_repeated_header_line(line: str) -> bool:
     return False
 
 
+def _canonical_heading(line: str) -> str:
+    line = re.sub(r"\s+", " ", line.strip())
+    if not line:
+        return ""
+    lowered = line.strip(":：").lower()
+    if lowered in _KNOWN_HEADINGS:
+        return lowered
+    match = re.match(
+        r"(?i)^(abstract|introduction|background|keywords|key words|case presentation|case report|discussion|references|conclusion|acknowledgements|acknowledgments)\b",
+        line,
+    )
+    if not match:
+        return ""
+    return match.group(1).lower()
+
+
+def _clean_journal_name(journal_raw: str) -> str:
+    journal = re.sub(r"\s+", " ", journal_raw).strip().strip(" .;,:-–—")
+    if not journal:
+        return ""
+    lowered = journal.lower()
+    last_journal = lowered.rfind("journal")
+    if last_journal != -1:
+        journal = journal[last_journal:].strip()
+    journal = re.sub(r"^(?:©|\(c\)|copyright)\s*\d{4}\s*", "", journal, flags=re.IGNORECASE).strip()
+    return journal.strip(" .;,:-–—")
+
+
 def _should_resume_after_caption(line: str, paragraph: list[str], previous_text: str) -> bool:
     lowered = line.strip().lower()
     if not lowered:
@@ -303,6 +335,7 @@ def clean_extracted_text(text: str) -> str:
     front_matter_budget = 80
     in_caption_block = False
     caption_budget = 0
+    seen_deduped: set[str] = set()
 
     def _front_matter_ended_by_heading(line: str) -> bool:
         normalized = re.sub(r"\s+", " ", line.strip()).strip(":：").lower()
@@ -361,7 +394,13 @@ def clean_extracted_text(text: str) -> str:
         if _is_layout_noise_line(line):
             continue
 
-        if not in_front_matter and counts.get(line, 0) >= 2 and _looks_like_repeated_header_line(line):
+        if counts.get(line, 0) >= 2 and _looks_like_repeated_header_line(line):
+            if line in seen_deduped:
+                continue
+            seen_deduped.add(line)
+            flush_paragraph()
+            out_lines.append(line)
+            last_emitted = line
             continue
 
         if not in_front_matter and _CAPTION_START_RE.match(line):
@@ -372,6 +411,7 @@ def clean_extracted_text(text: str) -> str:
         if _URL_RE.match(line) or _DOI_URL_RE.match(line) or _PAGE_NUMBER_RE.match(line):
             flush_paragraph()
             out_lines.append(line)
+            last_emitted = line
             continue
 
         if _is_heading_line(line):
@@ -412,27 +452,101 @@ def clean_extracted_text(text: str) -> str:
 
 
 def _looks_like_affiliation_line(line: str) -> bool:
-    if re.search(r"\b\d+\)\s+", line):
+    if re.search(r"^\s*\d+\)\s+", line):
         return True
-    if "department" in line.lower() and ("hospital" in line.lower() or "university" in line.lower()):
+    lowered = line.lower()
+    if re.match(r"^\s*\d+\s+(?:department|division|faculty|school|university|hospital|medical center|centre|center|clinic|institute|laboratory|unit)\b", lowered):
+        return True
+    if re.match(r"^\s*\d+\s+\S+", lowered) and any(
+        k in lowered
+        for k in [
+            "department",
+            "division",
+            "faculty",
+            "school",
+            "university",
+            "hospital",
+            "medical center",
+            "medical centre",
+            "centre",
+            "center",
+            "clinic",
+            "institute",
+            "laboratory",
+        ]
+    ):
+        return True
+    if "department" in lowered and any(
+        k in lowered
+        for k in [
+            "hospital",
+            "university",
+            "medical center",
+            "medical centre",
+            "centre",
+            "center",
+            "clinic",
+            "institute",
+        ]
+    ):
+        return True
+    return False
+
+
+def _looks_like_author_line(line: str) -> bool:
+    line = line.strip()
+    if not line or _looks_like_affiliation_line(line):
+        return False
+    lowered = line.lower()
+    if re.search(r"(?i)\b(md|phd|m\.d\.|msc|m\.sc\.|ms)\b", line):
+        return True
+    if "," in line and re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", line):
+        return True
+    if " and " in lowered:
+        return True
+    if len(line) <= 60 and re.fullmatch(r"[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){1,3}", line):
         return True
     return False
 
 
 def _split_affiliations_from_line(line: str) -> list[str]:
+    line = line.strip()
     if not re.search(r"\b\d+\)\s+", line):
+        return []
+    lowered = line.lower()
+    if "affiliat" not in lowered and not re.match(r"^\d+\)\s+", line):
         return []
     parts = re.split(r"(?=\b\d+\)\s+)", line)
     return [p.strip() for p in parts if re.match(r"^\d+\)\s+", p.strip())]
 
 
 def _find_citation(lines: list[str]) -> dict[str, str]:
-    for line in lines[:200]:
+    ref_idx = -1
+    for i, line in enumerate(lines):
+        if _canonical_heading(line) == "references":
+            ref_idx = i
+            break
+    search_lines = lines[:ref_idx] if ref_idx != -1 else lines
+
+    for line in search_lines:
+        match = _VOL_NO_PAGES_RE.search(line)
+        if not match:
+            continue
+        pages = match.group("pages") or ""
+        return {
+            "journal_name": _clean_journal_name(match.group("journal")),
+            "year": match.group("year").strip(),
+            "volume": match.group("volume").strip(),
+            "issue": match.group("issue").strip(),
+            "pages": re.sub(r"\s+", "", pages),
+        }
+
+    for line in search_lines:
         match = _CITATION_RE.search(line)
         if not match:
             continue
         return {
-            "journal_name": match.group("journal").strip(),
+            "journal_name": _clean_journal_name(match.group("journal")),
             "year": match.group("year").strip(),
             "volume": match.group("volume").strip(),
             "issue": match.group("issue").strip(),
@@ -490,6 +604,8 @@ def _find_journal_name(lines: list[str]) -> str:
         candidate = re.sub(r"https?://\S+", "", candidate).strip()
         if not candidate:
             continue
+        if len(candidate) > 120:
+            continue
         lowered = candidate.lower()
         if lowered.startswith("journal:"):
             continue
@@ -516,6 +632,59 @@ def _find_title(lines: list[str]) -> str:
             if _looks_like_affiliation_line(candidate):
                 continue
             return candidate
+
+    stop_idx = len(lines)
+    for i, line in enumerate(lines[:60]):
+        heading = _canonical_heading(line)
+        if heading in {
+            "abstract",
+            "introduction",
+            "background",
+            "case presentation",
+            "case report",
+            "keywords",
+            "key words",
+            "main text",
+        }:
+            stop_idx = i
+            break
+        if _looks_like_affiliation_line(line):
+            stop_idx = i
+            break
+
+    pool = lines[:stop_idx] if stop_idx > 0 else lines[:60]
+    title_lines: list[str] = []
+    started = False
+    for line in pool:
+        candidate = line.strip()
+        if not candidate:
+            if started:
+                break
+            continue
+        lowered = candidate.lower()
+        if any(x in lowered for x in ["http", "doi", "creativecommons", "license"]):
+            continue
+        if candidate.isupper() and "journal" in lowered:
+            continue
+        if _ARTICLE_TYPE_HINT_RE.search(candidate):
+            continue
+        if _looks_like_author_line(candidate):
+            if started:
+                break
+            continue
+        if len(candidate) > 200:
+            if started:
+                break
+            continue
+        title_lines.append(candidate)
+        started = True
+        if len(title_lines) >= 3:
+            break
+
+    if title_lines:
+        merged = re.sub(r"\s+", " ", " ".join(title_lines)).strip()
+        if len(merged) >= 10:
+            return merged
 
     candidates: list[str] = []
     for line in lines[:80]:
@@ -569,20 +738,35 @@ def _find_authors(lines: list[str], title: str) -> str:
     window = lines[search_start : search_start + 20]
     candidate_lines: list[str] = []
     for line in window:
-        lowered = line.lower()
+        trimmed = line.strip()
+        if title and len(trimmed) >= 10 and trimmed.lower() in title.lower():
+            continue
+        lowered = trimmed.lower()
         if lowered.startswith(("abstract", "keywords")):
             break
         if any(x in lowered for x in ["received", "accepted", "conflict", "copyright", "creativecommons"]):
             break
         if _looks_like_affiliation_line(line) and any(
-            k in lowered for k in ["department", "hospital", "university", "institute", "centre", "center", "clinic"]
+            k in lowered
+            for k in [
+                "department",
+                "hospital",
+                "university",
+                "medical center",
+                "medical centre",
+                "institute",
+                "centre",
+                "center",
+                "clinic",
+            ]
         ):
             break
-        candidate_lines.append(line.strip())
+        candidate_lines.append(trimmed)
 
     raw = " ".join(part for part in candidate_lines if part)
     raw = _EMAIL_RE.sub("", raw)
     raw = re.sub(r"(?:\b\d+\)\s*)+", "", raw)
+    raw = re.sub(r"\d+", "", raw)
     raw = re.sub(r"\s+", " ", raw).strip(" -–—―")
     if raw and len(raw.split()) >= 2 and len(raw) <= 200:
         return raw
@@ -611,6 +795,8 @@ def _extract_first_author(authors: str) -> str:
     authors = re.sub(r"\s+", " ", authors).strip()
     if not authors:
         return ""
+    if "," in authors:
+        return authors.split(",", 1)[0].strip().strip(",;")
     match = re.split(r"\s+(?:and|&)\s+", authors, maxsplit=1, flags=re.IGNORECASE)
     if match and match[0] and match[0] != authors:
         return match[0].strip().strip(",;")
@@ -714,8 +900,9 @@ def _find_affiliations(lines: list[str]) -> str:
         entry = re.sub(r"\s+", " ", entry).strip()
         if not entry or entry in seen:
             continue
-        match = re.match(r"^(?P<num>\d+)\)\s+(?P<rest>.+)$", entry)
+        match = re.match(r"^(?P<num>\d+)\s*(?:\)|[.)])?\s+(?P<rest>.+)$", entry)
         if match:
+            entry = f"{match.group('num')}) {match.group('rest').strip()}"
             rest = match.group("rest").strip()
             rest_lower = rest.lower()
             if rest_lower.startswith("and "):
@@ -729,6 +916,8 @@ def _find_affiliations(lines: list[str]) -> str:
                     "school",
                     "university",
                     "hospital",
+                    "medical center",
+                    "medical centre",
                     "institute",
                     "centre",
                     "center",
@@ -752,31 +941,58 @@ def extract_metadata(text: str) -> dict[str, str]:
     doi = _extract_doi(text)
     labeled = _extract_labeled_fields(text)
 
+    front_end = len(lines)
+    for i, line in enumerate(lines[:300]):
+        if _canonical_heading(line) in {
+            "abstract",
+            "introduction",
+            "background",
+            "keywords",
+            "key words",
+            "case presentation",
+            "case report",
+            "main text",
+        }:
+            front_end = i
+            break
+    front_lines = lines[:front_end] if front_end > 0 else lines[: min(len(lines), 120)]
+
     citation: dict[str, str] = {}
     if labeled.get("journal_raw"):
-        match = _CITATION_RE.search(labeled["journal_raw"])
-        if match:
-            citation = {
-                "journal_name": match.group("journal").strip(),
-                "year": match.group("year").strip(),
-                "volume": match.group("volume").strip(),
-                "issue": match.group("issue").strip(),
-                "pages": re.sub(r"\s+", "", match.group("pages")),
-            }
-        else:
-            citation = {}
+        for pat in (_VOL_NO_PAGES_RE, _CITATION_RE):
+            match = pat.search(labeled["journal_raw"])
+            if not match:
+                continue
+            if pat is _VOL_NO_PAGES_RE:
+                pages = match.group("pages") or ""
+                citation = {
+                    "journal_name": _clean_journal_name(match.group("journal")),
+                    "year": match.group("year").strip(),
+                    "volume": match.group("volume").strip(),
+                    "issue": match.group("issue").strip(),
+                    "pages": re.sub(r"\s+", "", pages),
+                }
+            else:
+                citation = {
+                    "journal_name": _clean_journal_name(match.group("journal")),
+                    "year": match.group("year").strip(),
+                    "volume": match.group("volume").strip(),
+                    "issue": match.group("issue").strip(),
+                    "pages": re.sub(r"\s+", "", match.group("pages")),
+                }
+            break
     if not citation:
         citation = _find_citation(lines)
 
-    journal_name = _find_journal_name(lines) or citation.get("journal_name", "")
+    journal_name = _find_journal_name(front_lines) or citation.get("journal_name", "")
 
-    title = labeled.get("title") or _find_title(lines)
+    title = labeled.get("title") or _find_title(front_lines)
 
     labeled_authors = labeled.get("authors") or ""
-    authors = labeled_authors or _find_authors(lines, title)
+    authors = labeled_authors or _find_authors(front_lines, title)
 
     labeled_aff = labeled.get("affiliations") or ""
-    affiliations = labeled_aff or _find_affiliations(lines)
+    affiliations = labeled_aff or _find_affiliations(front_lines)
 
     return {
         "paper_title": title,
@@ -797,9 +1013,18 @@ def extract_structured_sections(clean_text: str) -> dict[str, str]:
     def norm(line: str) -> str:
         return re.sub(r"\s+", " ", line.strip()).strip(":：").lower()
 
+    def is_heading(line: str, names: set[str]) -> bool:
+        n = norm(line)
+        for name in names:
+            if n == name:
+                return True
+            if n.startswith(name) and len(n) > len(name) and n[len(name)] in {" ", ":", "："}:
+                return True
+        return False
+
     def find_heading(names: set[str]) -> int:
         for i, line in enumerate(lines):
-            if norm(line) in names:
+            if is_heading(line, names):
                 return i
         return -1
 
@@ -809,7 +1034,7 @@ def extract_structured_sections(clean_text: str) -> dict[str, str]:
             return ""
         buf: list[str] = []
         for line in lines[start + 1 :]:
-            if norm(line) in end_names:
+            if is_heading(line, end_names):
                 break
             buf.append(line)
         return _normalize_section_text(buf)
@@ -841,10 +1066,28 @@ def extract_structured_sections(clean_text: str) -> dict[str, str]:
         return "\n\n".join(p for p in paragraphs if p)
 
     abstract = collect_between({"abstract"}, {"keywords", "key words", "introduction", "background", "references"})
-    introduction = collect_between({"introduction", "background"}, {"case presentation", "case report", "discussion", "references"})
+    introduction = collect_between(
+        {"introduction", "background"},
+        {"case presentation", "case report", "discussion", "conclusion", "references"},
+    )
 
-    discussion = collect_between({"discussion"}, {"references"})
-    case_presentation = collect_between({"case presentation", "case report"}, {"discussion", "references"})
+    discussion = collect_between({"discussion"}, {"conclusion", "acknowledgments", "acknowledgements", "references"})
+    case_presentation = collect_between({"case presentation", "case report"}, {"discussion", "conclusion", "references"})
+
+    if not abstract:
+        kw_idx = find_heading({"keywords", "key words"})
+        if kw_idx >= 0:
+            end_idx = kw_idx
+        else:
+            intro_idx = find_heading({"introduction", "background"})
+            end_idx = intro_idx if intro_idx >= 0 else -1
+        if end_idx > 0:
+            last_aff = -1
+            for i in range(0, end_idx):
+                if _looks_like_affiliation_line(lines[i]):
+                    last_aff = i
+            start_idx = last_aff + 1 if last_aff >= 0 else 0
+            abstract = _normalize_section_text(lines[start_idx:end_idx])
 
     if not (case_presentation and discussion):
         main_text = slice_main_text()

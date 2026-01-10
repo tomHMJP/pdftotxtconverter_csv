@@ -42,6 +42,26 @@ Abstract
 ...
 """
 
+SAMPLE_TEXT_VOL_NO = """Hereditary Spherocytosis Presenting with Immunoglobulin
+A Nephropathy in Post-Splenectomy
+Yoshinosuke Shimamura, MD,1 Takako Akimoto, MD,1
+Norihito Moniwa, MD,1 Koichi Hasegawa, MD,1
+Yayoi Ogawa, MD,2 and Hideki Takizawa, MD1
+1 Department of Nephrology, Teine Keijinkai Medical Center, Sapporo, Hokkaido, Japan
+2 Hokkaido Renal Pathology Center, Sapporo, Hokkaido, Japan
+Hereditary spherocytosis is a familial hemolytic anemia.
+Keywords: hereditary spherocytosis, IgA nephropathy, angiotensin converting enzyme inhibitor
+Introduction
+...
+Case Presentation
+A 72-year-old male was referred to our medical center.
+© 2016 Japan Primary Care Association Journal of General and Family Medicine 2016, vol. 17, no. 4, p. 307–310.
+Discussion
+...
+References
+Wyatt RJ, Julian BA: IgA nephropathy. N Engl J Med. 2013; 368(25): 2402–2414.
+"""
+
 
 class TestMetadataExtraction(unittest.TestCase):
     def test_extract_metadata_basic_fields(self) -> None:
@@ -86,6 +106,22 @@ class TestMetadataExtraction(unittest.TestCase):
         self.assertIn("1) Department of General Internal Medicine", affiliations)
         self.assertIn("2) Nephrology Department", affiliations)
         self.assertIn("3) Gastroenterology Department", affiliations)
+
+    def test_extract_metadata_vol_no_style(self) -> None:
+        meta = extract_metadata(SAMPLE_TEXT_VOL_NO)
+        self.assertEqual(
+            meta["paper_title"],
+            "Hereditary Spherocytosis Presenting with Immunoglobulin A Nephropathy in Post-Splenectomy",
+        )
+        self.assertEqual(meta["journal_name"], "Journal of General and Family Medicine")
+        self.assertEqual(meta["year"], "2016")
+        self.assertEqual(meta["volume"], "17")
+        self.assertEqual(meta["issue"], "4")
+        self.assertEqual(meta["pages"], "307–310")
+        self.assertIn("Yoshinosuke Shimamura", meta["authors"])
+        self.assertIn("Hideki Takizawa", meta["authors"])
+        self.assertIn("1) Department of Nephrology", meta["affiliations"])
+        self.assertIn("2) Hokkaido Renal Pathology Center", meta["affiliations"])
 
 
 if __name__ == "__main__":
