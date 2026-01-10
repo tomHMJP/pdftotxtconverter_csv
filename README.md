@@ -72,6 +72,8 @@ PDFを `input_pdfs/` に追加するたびに自動で更新したい場合:
 - `first_author`（筆頭著者）
 - `first_author_affiliations`（筆頭著者の所属）
 - `first_author_specialties`（所属から推測した診療科名）
+- `tentative_diagnoses`（途中の暫定診断）
+- `final_diagnoses`（最終診断）
 - `affiliations`（所属）
 - `abstract`, `introduction`, `case_presentation`, `discussion`（章ごとの本文）
 - `full_text`（txt全文）
