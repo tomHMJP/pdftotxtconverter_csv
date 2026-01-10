@@ -287,9 +287,12 @@ def _should_resume_after_caption(line: str, paragraph: list[str], previous_text:
     if lowered.startswith(("the patient", "he ", "she ", "they ", "we ")):
         return True
     tail = paragraph[-1].strip() if paragraph else previous_text.strip()
-    if tail and re.search(r"(?i)\b(in|of|to|for|with|without|by|as|at|from|during|on)\s*$", tail) and re.match(
-        r"(?i)^(the|a|an)\b", lowered
-    ):
+    preposition_tail = bool(
+        tail and re.search(r"(?i)\b(in|of|to|for|with|without|by|as|at|from|during|on)\s*$", tail)
+    )
+    if tail and not preposition_tail and _should_join_soft_break(tail, line):
+        return True
+    if preposition_tail and re.match(r"(?i)^(the|a|an)\b", lowered):
         return True
     return False
 
@@ -1411,6 +1414,131 @@ def extract_structured_sections(clean_text: str) -> dict[str, str]:
     }
 
 
+_LEADING_CONNECTOR_RE = re.compile(
+    r"(?i)^(?:although|however|but|therefore|thus|then|instead|overall|given that|because|since|in this case|in the present case|in the current case|on day\s+\d+)\b[,:]?\s*"
+)
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        item = re.sub(r"\s+", " ", item).strip().strip(" ,;:-–—―")
+        if not item:
+            continue
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _strip_leading_connectors(text: str) -> str:
+    text = text.strip().strip(" ,;:-–—―")
+    while True:
+        updated = _LEADING_CONNECTOR_RE.sub("", text).strip()
+        updated = updated.lstrip(",").strip()
+        if updated == text:
+            return text
+        text = updated
+
+
+def _extract_preceding_phrase(text: str, match_start: int) -> str:
+    boundaries = [
+        text.rfind("\n", 0, match_start),
+        text.rfind(".", 0, match_start),
+        text.rfind("!", 0, match_start),
+        text.rfind("?", 0, match_start),
+        text.rfind(";", 0, match_start),
+    ]
+    start = max(boundaries)
+    if start == -1:
+        start = 0
+    else:
+        start += 1
+    prefix = text[start:match_start].strip()
+    if "," in prefix:
+        prefix = prefix.split(",")[-1].strip()
+    prefix = _strip_leading_connectors(prefix)
+    prefix = prefix.strip().strip(" ,;:-–—―")
+    words = prefix.split()
+    if len(words) > 16:
+        prefix = " ".join(words[-16:])
+    return prefix
+
+
+def _extract_following_phrase(text: str, match_end: int) -> str:
+    tail = text[match_end:]
+    tail = re.sub(r"^\s+", "", tail)
+    tail = re.split(r"[.;\n]", tail, maxsplit=1)[0]
+    return tail.strip().strip(" ,;:-–—―")
+
+
+def extract_diagnoses(sections: dict[str, str]) -> dict[str, str]:
+    case_text = sections.get("case_presentation", "") or ""
+    abstract_text = sections.get("abstract", "") or ""
+    discussion_text = sections.get("discussion", "") or ""
+
+    tentative_source = re.sub(r"\s+", " ", case_text).strip()
+    final_source = re.sub(r"\s+", " ", "\n".join([case_text, abstract_text, discussion_text])).strip()
+
+    tentative: list[str] = []
+    for match in re.finditer(r"(?i)\b(?:was|were)\s+(?:also\s+)?considered\b", tentative_source):
+        dx = _extract_preceding_phrase(tentative_source, match.start())
+        tentative.append(dx)
+    for match in re.finditer(r"(?i)\b(?:was|were)\s+suspected\b", tentative_source):
+        dx = _extract_preceding_phrase(tentative_source, match.start())
+        tentative.append(dx)
+    for match in re.finditer(r"(?i)\bsuspicion\s+of\b", tentative_source):
+        dx = _extract_following_phrase(tentative_source, match.end())
+        tentative.append(dx)
+
+    tentative = [
+        dx
+        for dx in tentative
+        if dx
+        and not dx.lower().startswith(("the patient", "patient", "he ", "she ", "they ", "we "))
+        and len(dx) <= 200
+    ]
+    tentative = _dedupe_keep_order(tentative)
+
+    final: list[str] = []
+    for match in re.finditer(
+        r"(?i)\b(?:was|were)\s+(?:promptly\s+|clinically\s+|presumptively\s+|ultimately\s+|definitively\s+|finally\s+)?diagnosed\b",
+        final_source,
+    ):
+        dx = _extract_preceding_phrase(final_source, match.start())
+        final.append(dx)
+    for match in re.finditer(r"(?i)\bdiagnosed\s+(?:with|as)\b", final_source):
+        dx = _extract_following_phrase(final_source, match.end())
+        final.append(dx)
+    for match in re.finditer(
+        r"(?i)\bconfirm(?:ed)?\s+(?:the\s+presence\s+of|presence\s+of|the\s+diagnosis\s+of|diagnosis\s+of)\s+",
+        final_source,
+    ):
+        dx = _extract_following_phrase(final_source, match.end())
+        final.append(dx)
+    for match in re.finditer(r"(?i)\b(?:revealed|identified)\s+(?:a|an)\s+", final_source):
+        dx = _extract_following_phrase(final_source, match.end())
+        if "mutation" in dx.lower() or "thromb" in dx.lower():
+            final.append(dx)
+
+    final = [
+        dx
+        for dx in final
+        if dx
+        and not dx.lower().startswith(("the patient", "patient", "he ", "she ", "they ", "we "))
+        and len(dx) <= 240
+    ]
+    final = _dedupe_keep_order(final)
+
+    return {
+        "tentative_diagnoses": " | ".join(tentative),
+        "final_diagnoses": " | ".join(final),
+    }
+
+
 def write_csv(rows: list[dict[str, str]], csv_path: Path) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -1426,6 +1554,8 @@ def write_csv(rows: list[dict[str, str]], csv_path: Path) -> None:
         "first_author",
         "first_author_affiliations",
         "first_author_specialties",
+        "tentative_diagnoses",
+        "final_diagnoses",
         "affiliations",
         "doi",
         "extracted_at",
@@ -1558,6 +1688,7 @@ def process_pdfs(
             first_aff_nums = [sorted(aff_map.keys())[0]]
         first_affs = " | ".join(aff_map.get(n, "").strip() for n in first_aff_nums if aff_map.get(n, "").strip())
         first_specs = _infer_specialties_from_affiliations(first_affs)
+        diagnoses = extract_diagnoses(sections)
 
         rows.append(
             {
@@ -1570,6 +1701,7 @@ def process_pdfs(
                 "first_author": first_author,
                 "first_author_affiliations": first_affs,
                 "first_author_specialties": first_specs,
+                **diagnoses,
                 **sections,
             }
         )

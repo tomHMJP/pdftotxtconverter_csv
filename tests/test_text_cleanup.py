@@ -91,6 +91,24 @@ References
         self.assertNotIn("E-Mail:", cleaned)
         self.assertNotIn("Japan Primary Care Association", cleaned)
 
+    def test_cleanup_caption_block_does_not_swallow_case_text(self) -> None:
+        raw = """Case Report
+Brain natriuretic peptide was also normal at 7.0
+Figure 1. Imaging findings on admission. (A) Something.
+(B) Something else.
+pg/mL (normal <18.4 pg/mL).
+As shown in Fig. 1, proximal deep vein thrombosis (DVT) was promptly diagnosed.
+She was initially treated with heparin.
+References
+1. Example.
+"""
+        cleaned = clean_extracted_text(raw)
+        self.assertIn(
+            "Brain natriuretic peptide was also normal at 7.0 pg/mL (normal <18.4 pg/mL). As shown in Fig. 1, proximal deep vein thrombosis (DVT) was promptly diagnosed. She was initially treated with heparin.",
+            cleaned,
+        )
+        self.assertNotIn("Figure 1. Imaging findings", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()
