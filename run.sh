@@ -17,6 +17,8 @@ if [[ $# -ge 1 && "${1:-}" != "-"* ]]; then
   fi
 fi
 
+echo "Input: $INPUT_PATH" >&2
+
 exec "$SCRIPT_DIR/.venv/bin/python" case_report_pipeline.py \
   --input "$INPUT_PATH" \
   --txt-out output/txt \

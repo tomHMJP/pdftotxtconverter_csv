@@ -211,4 +211,5 @@ pyrightconfig.json
 # Project-specific
 input_pdfs/
 output/
+テンポラリ/
 テンポラリ/

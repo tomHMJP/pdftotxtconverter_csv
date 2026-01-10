@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import shutil
@@ -44,6 +45,17 @@ def extract_text(pdf_path: Path) -> tuple[str, str]:
     return _extract_text_with_pymupdf(pdf_path), "pymupdf"
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def iter_pdfs(input_path: Path) -> list[Path]:
     if input_path.is_file():
         if input_path.suffix.lower() != ".pdf":
@@ -61,6 +73,41 @@ def iter_pdfs(input_path: Path) -> list[Path]:
             continue
         pdfs.append(path)
     return sorted(pdfs)
+
+
+def _output_paths_for_pdf(pdf_path: Path, input_root: Path, txt_out: Path) -> tuple[Path, Path]:
+    try:
+        rel = pdf_path.relative_to(input_root)
+    except ValueError:
+        rel = Path(pdf_path.name)
+    out_path = (txt_out / rel).with_suffix(".txt")
+    meta_path = out_path.with_suffix(".meta.json")
+    return out_path, meta_path
+
+
+def _sync_txt_outputs(txt_out: Path, keep_files: set[Path]) -> None:
+    if not txt_out.exists():
+        return
+    keep_files = {p.resolve() for p in keep_files}
+    for path in txt_out.rglob("*"):
+        if not path.is_file():
+            continue
+        name = path.name
+        if not (name.endswith(".txt") or name.endswith(".meta.json")):
+            continue
+        if path.resolve() in keep_files:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+    for directory in sorted([p for p in txt_out.rglob("*") if p.is_dir()], reverse=True):
+        try:
+            if not any(directory.iterdir()):
+                directory.rmdir()
+        except OSError:
+            continue
 
 
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE)
@@ -1792,9 +1839,11 @@ def _pdf_states(pdfs: list[Path]) -> list[tuple[str, int, int]]:
 
 def process_pdfs(
     pdfs: list[Path],
+    input_root: Path,
     txt_out: Path,
     csv_out: Path | None,
     force: bool,
+    sync_output: bool,
 ) -> None:
     if not pdfs:
         return
@@ -1803,41 +1852,75 @@ def process_pdfs(
 
     extracted_at = _utc_now_iso()
     rows: list[dict[str, str]] = []
+    expected_outputs: set[Path] = set()
 
     for pdf_path in pdfs:
-        out_path = txt_out / f"{pdf_path.stem}.txt"
-        meta_path = out_path.with_suffix(".meta.json")
+        out_path, meta_path = _output_paths_for_pdf(pdf_path, input_root, txt_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_outputs.add(out_path)
+        expected_outputs.add(meta_path)
         wrote_txt = False
         figure_legends = ""
+        pdf_stat = pdf_path.stat()
+        pdf_size = int(pdf_stat.st_size)
+        pdf_mtime_ns = int(pdf_stat.st_mtime_ns)
+        pdf_sha256 = ""
 
         needs_extract = force or not out_path.exists()
         if not needs_extract:
             try:
-                needs_extract = out_path.stat().st_mtime_ns < pdf_path.stat().st_mtime_ns
+                out_mtime_ns = int(out_path.stat().st_mtime_ns)
             except FileNotFoundError:
-                needs_extract = True
+                out_mtime_ns = 0
+            if out_mtime_ns >= pdf_mtime_ns:
+                needs_extract = False
+            else:
+                cached_meta: dict[str, str] = {}
+                if meta_path.exists():
+                    try:
+                        cached = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
+                        if isinstance(cached, dict):
+                            cached_meta = {str(k): str(v) for k, v in cached.items()}
+                    except Exception:
+                        cached_meta = {}
+                meta_sha256 = cached_meta.get("source_pdf_sha256", "")
+                meta_size = int(cached_meta.get("source_pdf_size", "0") or "0")
+                if meta_sha256 and meta_size == pdf_size:
+                    try:
+                        pdf_sha256 = _sha256_file(pdf_path)
+                    except OSError:
+                        pdf_sha256 = ""
+                    needs_extract = not (pdf_sha256 and pdf_sha256 == meta_sha256)
+                else:
+                    needs_extract = True
 
         if not needs_extract:
             if not csv_out:
                 continue
-            raw_text = out_path.read_text(encoding="utf-8-sig", errors="replace")
+            cleaned_text = out_path.read_text(encoding="utf-8-sig", errors="replace")
             extractor = "txt-cache"
         else:
             raw_text, extractor = extract_text(pdf_path)
             if csv_out:
                 figure_legends = extract_figure_legends(raw_text)
-            # UTF-8 with BOM improves compatibility with apps that otherwise assume Shift-JIS.
             cleaned_text = clean_extracted_text(raw_text)
             out_path.write_text(cleaned_text, encoding="utf-8-sig", newline="\n")
             wrote_txt = True
-
-        cleaned_text = clean_extracted_text(raw_text)
+            try:
+                pdf_sha256 = _sha256_file(pdf_path)
+            except OSError:
+                pdf_sha256 = ""
 
         metadata: dict[str, str] = {}
         if needs_extract:
             metadata = extract_metadata(raw_text)
             if csv_out and figure_legends:
                 metadata["figure_legends"] = figure_legends
+            metadata["source_pdf_path"] = str(pdf_path)
+            metadata["source_pdf_size"] = str(pdf_size)
+            metadata["source_pdf_mtime_ns"] = str(pdf_mtime_ns)
+            if pdf_sha256:
+                metadata["source_pdf_sha256"] = pdf_sha256
             try:
                 meta_path.write_text(
                     json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
@@ -1921,6 +2004,8 @@ def process_pdfs(
     if csv_out:
         write_csv(rows, csv_out)
         print(csv_out)
+    if sync_output:
+        _sync_txt_outputs(txt_out, expected_outputs)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1945,6 +2030,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Overwrite existing .txt files",
     )
     parser.add_argument(
+        "--sync-output",
+        "--sync",
+        dest="sync_output",
+        action="store_true",
+        help="Remove output .txt/.meta.json files that are not present under --input",
+    )
+    parser.add_argument(
         "--watch",
         action="store_true",
         help="Watch a directory and re-run when PDFs change",
@@ -1963,6 +2055,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.watch and not args.input.exists():
         args.input.mkdir(parents=True, exist_ok=True)
 
+    input_root = args.input.parent if args.input.is_file() else args.input
+
     if not args.watch:
         pdfs = iter_pdfs(args.input)
         if not pdfs:
@@ -1973,7 +2067,7 @@ def main(argv: list[str] | None = None) -> int:
                 "  ./run.sh /path/to/pdfs\n"
                 "  ./run.sh /path/to/file.pdf"
             )
-        process_pdfs(pdfs, args.txt_out, args.csv_out, args.force)
+        process_pdfs(pdfs, input_root, args.txt_out, args.csv_out, args.force, args.sync_output)
         return 0
 
     print(f"Watching: {args.input} (interval={args.interval}s)")
@@ -1985,10 +2079,10 @@ def main(argv: list[str] | None = None) -> int:
             if last_states is None:
                 last_states = states
                 if pdfs:
-                    process_pdfs(pdfs, args.txt_out, args.csv_out, args.force)
+                    process_pdfs(pdfs, input_root, args.txt_out, args.csv_out, args.force, args.sync_output)
             elif states != last_states:
                 last_states = states
-                process_pdfs(pdfs, args.txt_out, args.csv_out, args.force)
+                process_pdfs(pdfs, input_root, args.txt_out, args.csv_out, args.force, args.sync_output)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         return 0
