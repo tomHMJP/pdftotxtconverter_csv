@@ -74,7 +74,7 @@ PDFを `input_pdfs/` に追加するたびに自動で更新したい場合:
 - `abstract`, `introduction`, `case_presentation`, `discussion`（章ごとの本文）
 - `full_text`（txt全文）
 
-txt/CSV の `full_text` は、PDF由来の「無駄な改行」や `suggest-\ning` のような改行ハイフン分割を可能な範囲で整形してから格納します。
+txt/CSV の `full_text` は、PDF由来の「無駄な改行」や `suggest-\ning` のような改行ハイフン分割に加えて、ページヘッダ/フッタ（例: `Corresponding author:`）や Figure/Table のキャプション混入も可能な範囲で除去してから格納します。
 
 メタデータは **抽出テキストからのルールベース推定** のため、レイアウトや雑誌ごとの差で誤りが出ることがあります（必要なら後続で精度向上できます）。
 
