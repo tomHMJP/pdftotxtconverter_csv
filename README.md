@@ -76,6 +76,7 @@ PDFを `input_pdfs/` に追加するたびに自動で更新したい場合:
 - `final_diagnoses`（最終診断）
 - `affiliations`（所属）
 - `abstract`, `introduction`, `case_presentation`, `discussion`（章ごとの本文）
+- `figure_legends`（Figure legend / 図のキャプション）
 - `full_text`（txt全文）
 
 txt/CSV の `full_text` は、PDF由来の「無駄な改行」や `suggest-\ning` のような改行ハイフン分割に加えて、ページヘッダ/フッタ（例: `Corresponding author:`）や Figure/Table のキャプション混入も可能な範囲で除去してから格納します。

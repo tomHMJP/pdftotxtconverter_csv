@@ -84,6 +84,8 @@ _DOI_URL_RE = re.compile(r"^https?://doi\.org/\S+$", re.IGNORECASE)
 _PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
 _CAPTION_START_RE = re.compile(r"^(?:figure|table)\s*\d+\s*[.:]\s+\S+", re.IGNORECASE)
 _CASE_START_RE = re.compile(r"\b(?:A|An)\s+\d{1,3}\s*[-–]?\s*year[- ]old\b", re.IGNORECASE)
+_FIGURE_CAPTION_START_RE = re.compile(r"^(?:figure|fig\.?)\s*\d+\s*[.:]\s+\S+", re.IGNORECASE)
+_FIGURE_PANEL_LABEL_RE = re.compile(r"^\d{0,2}[A-Z]{1,2}\d{0,2}$")
 
 _HYPHEN_CHARS = "-\u2010\u2011\u00ad"
 _HYPHEN_LINEBREAK_RE = re.compile(rf"(?P<left>[A-Za-z0-9]{{1,}})[{_HYPHEN_CHARS}]\n\s*(?P<right>[A-Za-z0-9]{{1,}})")
@@ -591,6 +593,128 @@ def clean_extracted_text(text: str) -> str:
     cleaned = _join_soft_paragraph_breaks(cleaned)
 
     return "\n".join(cleaned).strip() + "\n"
+
+
+def extract_figure_legends(text: str) -> str:
+    text = _normalize_text(text)
+    text = text.replace("\u00a0", " ").replace("\u3000", " ")
+    text = text.replace("\x02", "≥")
+    text = _fix_hyphen_linebreaks(text)
+
+    raw_lines = [line.rstrip() for line in text.split("\n")]
+    counts: dict[str, int] = {}
+    for raw in raw_lines:
+        normalized = re.sub(r"\s+", " ", raw.strip())
+        if not normalized:
+            continue
+        counts[normalized] = counts.get(normalized, 0) + 1
+
+    legends: list[str] = []
+    current: list[str] = []
+
+    paragraph: list[str] = []
+    last_emitted = ""
+    seen_deduped: set[str] = set()
+    in_caption_block = False
+    caption_budget = 0
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        nonlocal last_emitted
+        if not paragraph:
+            return
+        merged = " ".join(part.strip() for part in paragraph if part.strip())
+        merged = re.sub(r"\s+", " ", merged).strip()
+        if merged:
+            last_emitted = merged
+        paragraph = []
+
+    def flush_caption() -> None:
+        nonlocal current
+        if not current:
+            return
+        merged = " ".join(part.strip() for part in current if part.strip())
+        merged = re.sub(r"\s+", " ", merged).strip()
+        if merged:
+            legends.append(merged)
+        current = []
+
+    for raw_line in raw_lines:
+        line = re.sub(r"\s+", " ", raw_line.strip()).strip()
+
+        if in_caption_block:
+            if not line:
+                flush_caption()
+                in_caption_block = False
+                continue
+            if _FIGURE_CAPTION_START_RE.match(line):
+                flush_caption()
+                current = [line]
+                caption_budget = 40
+                continue
+            if len(line) <= 3 and _FIGURE_PANEL_LABEL_RE.fullmatch(line):
+                continue
+            if _is_heading_line(line):
+                flush_caption()
+                in_caption_block = False
+                continue
+            if _should_resume_after_caption(line, paragraph, last_emitted):
+                flush_caption()
+                in_caption_block = False
+            else:
+                caption_budget -= 1
+                if caption_budget <= 0:
+                    flush_caption()
+                    in_caption_block = False
+                    continue
+                lowered = line.lower()
+                if _URL_RE.match(line) or _DOI_URL_RE.match(line) or _PAGE_NUMBER_RE.match(line):
+                    continue
+                if counts.get(line, 0) >= 2 and _looks_like_repeated_header_line(line):
+                    continue
+                if _is_layout_noise_line(line):
+                    continue
+                if lowered.startswith(("http://", "https://", "doi:")):
+                    continue
+                current.append(line)
+                continue
+
+        if not line:
+            flush_paragraph()
+            continue
+
+        if _FIGURE_CAPTION_START_RE.match(line):
+            in_caption_block = True
+            caption_budget = 40
+            current = [line]
+            continue
+
+        if _URL_RE.match(line) or _DOI_URL_RE.match(line) or _PAGE_NUMBER_RE.match(line):
+            flush_paragraph()
+            continue
+
+        if _is_layout_noise_line(line):
+            continue
+
+        if counts.get(line, 0) >= 2 and _looks_like_repeated_header_line(line):
+            if line in seen_deduped:
+                continue
+            seen_deduped.add(line)
+            flush_paragraph()
+            last_emitted = line
+            continue
+
+        if _is_heading_line(line):
+            flush_paragraph()
+            continue
+
+        paragraph.append(line)
+
+    flush_paragraph()
+    flush_caption()
+
+    legends = _dedupe_keep_order(legends)
+    return "\n\n".join(legends).strip()
 
 
 def _looks_like_affiliation_line(line: str) -> bool:
@@ -1564,6 +1688,7 @@ def write_csv(rows: list[dict[str, str]], csv_path: Path) -> None:
         "introduction",
         "case_presentation",
         "discussion",
+        "figure_legends",
         "full_text",
     ]
     # Use UTF-8 with BOM so Excel (JP) opens without mojibake (Shift-JIS mis-detection).
@@ -1621,6 +1746,7 @@ def process_pdfs(
         out_path = txt_out / f"{pdf_path.stem}.txt"
         meta_path = out_path.with_suffix(".meta.json")
         wrote_txt = False
+        figure_legends = ""
 
         needs_extract = force or not out_path.exists()
         if not needs_extract:
@@ -1636,6 +1762,8 @@ def process_pdfs(
             extractor = "txt-cache"
         else:
             raw_text, extractor = extract_text(pdf_path)
+            if csv_out:
+                figure_legends = extract_figure_legends(raw_text)
             # UTF-8 with BOM improves compatibility with apps that otherwise assume Shift-JIS.
             cleaned_text = clean_extracted_text(raw_text)
             out_path.write_text(cleaned_text, encoding="utf-8-sig", newline="\n")
@@ -1646,6 +1774,8 @@ def process_pdfs(
         metadata: dict[str, str] = {}
         if needs_extract:
             metadata = extract_metadata(raw_text)
+            if csv_out and figure_legends:
+                metadata["figure_legends"] = figure_legends
             try:
                 meta_path.write_text(
                     json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
@@ -1666,10 +1796,28 @@ def process_pdfs(
             if not metadata:
                 metadata = extract_metadata(raw_text)
 
-            if not metadata.get("year") or not metadata.get("journal_name"):
+            if csv_out:
+                figure_legends = metadata.get("figure_legends", "")
+
+            needs_meta_refresh = not metadata.get("year") or not metadata.get("journal_name")
+            needs_fig_refresh = bool(csv_out and not figure_legends)
+            if needs_meta_refresh or needs_fig_refresh:
+                cached_figures = figure_legends
                 pdf_text, meta_extractor = extract_text(pdf_path)
-                metadata = extract_metadata(pdf_text)
-                extractor = f"txt-cache+{meta_extractor}-meta"
+                if needs_meta_refresh:
+                    metadata = extract_metadata(pdf_text)
+                    if cached_figures:
+                        metadata["figure_legends"] = cached_figures
+                if needs_fig_refresh:
+                    figure_legends = extract_figure_legends(pdf_text)
+                    if figure_legends:
+                        metadata["figure_legends"] = figure_legends
+                if needs_meta_refresh and needs_fig_refresh:
+                    extractor = f"txt-cache+{meta_extractor}-meta+fig"
+                elif needs_meta_refresh:
+                    extractor = f"txt-cache+{meta_extractor}-meta"
+                else:
+                    extractor = f"txt-cache+{meta_extractor}-fig"
                 try:
                     meta_path.write_text(
                         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
