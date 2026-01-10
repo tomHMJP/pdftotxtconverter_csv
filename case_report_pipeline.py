@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import shutil
 import subprocess
@@ -203,7 +204,15 @@ def _is_layout_noise_line(line: str) -> bool:
         return False
     if lowered.startswith("corresponding author:"):
         return True
+    if lowered.startswith(("e-mail:", "email:")):
+        return True
+    if lowered.startswith(("received for publication", "received for")):
+        return True
     if lowered.startswith(("received:", "accepted:", "copyright")):
+        return True
+    if lowered.startswith(("©", "(c)")):
+        return True
+    if re.fullmatch(r"[—–-]\s*\d{1,4}\s*[—–-]", line.strip()):
         return True
     if lowered.startswith("this is an open access journal distributed"):
         return True
@@ -335,6 +344,8 @@ def clean_extracted_text(text: str) -> str:
     front_matter_budget = 80
     in_caption_block = False
     caption_budget = 0
+    in_correspondence_block = False
+    correspondence_budget = 0
     seen_deduped: set[str] = set()
 
     def _front_matter_ended_by_heading(line: str) -> bool:
@@ -364,9 +375,66 @@ def clean_extracted_text(text: str) -> str:
         if out_lines and out_lines[-1] != "":
             out_lines.append("")
 
+    def _is_correspondence_start(line: str) -> bool:
+        lowered = line.strip().lower()
+        return lowered.startswith(("corresponding author:", "correspondence:", "correspondence to:"))
+
+    def _is_correspondence_noise(line: str) -> bool:
+        lowered = line.strip().lower()
+        if not lowered:
+            return False
+        if _is_layout_noise_line(line):
+            return True
+        if "e-mail" in lowered or "email" in lowered or _EMAIL_RE.search(line):
+            return True
+        if lowered in {"japan", "u.s.a.", "usa", "united states", "u.k.", "uk"}:
+            return True
+        if lowered.startswith(
+            (
+                "department",
+                "division",
+                "section",
+                "unit",
+                "faculty",
+                "school",
+                "university",
+                "hospital",
+                "medical center",
+                "medical centre",
+                "centre",
+                "center",
+                "clinic",
+                "institute",
+                "laboratory",
+            )
+        ):
+            return True
+        if "journal" in lowered and len(line) <= 120:
+            return True
+        if re.match(r"^20\d{2}\s*,?\s*vol\.?\s*\d+\b", lowered) or (
+            "vol" in lowered and "no" in lowered and re.search(r"\b20\d{2}\b", lowered)
+        ):
+            return True
+        if lowered in {"case reports", "case report"}:
+            return True
+        if re.search(r"(?:[—–-]\s*\d{1,4}\s*[—–-])\s*$", line.strip()):
+            return True
+        return False
+
     for raw_line in raw_lines:
         line = raw_line.strip()
         line = re.sub(r"\s+", " ", line).strip()
+
+        if in_correspondence_block:
+            if not line:
+                in_correspondence_block = False
+            elif _is_correspondence_noise(line):
+                correspondence_budget -= 1
+                if correspondence_budget <= 0:
+                    in_correspondence_block = False
+                continue
+            else:
+                in_correspondence_block = False
 
         if in_caption_block:
             if not line:
@@ -389,6 +457,11 @@ def clean_extracted_text(text: str) -> str:
             continue
 
         if _PAGE_NUMBER_RE.match(line):
+            continue
+
+        if _is_correspondence_start(line):
+            in_correspondence_block = True
+            correspondence_budget = 30
             continue
 
         if _is_layout_noise_line(line):
@@ -528,8 +601,17 @@ def _find_citation(lines: list[str]) -> dict[str, str]:
             break
     search_lines = lines[:ref_idx] if ref_idx != -1 else lines
 
-    for line in search_lines:
-        match = _VOL_NO_PAGES_RE.search(line)
+    def iter_candidates(lines_in: list[str]) -> list[str]:
+        candidates: list[str] = []
+        candidates.extend(lines_in)
+        for i in range(len(lines_in) - 1):
+            candidates.append(f"{lines_in[i]} {lines_in[i + 1]}")
+        return candidates
+
+    primary_lines = search_lines[:250]
+    candidates = iter_candidates(primary_lines)
+    for candidate in candidates:
+        match = _VOL_NO_PAGES_RE.search(candidate)
         if not match:
             continue
         pages = match.group("pages") or ""
@@ -541,8 +623,34 @@ def _find_citation(lines: list[str]) -> dict[str, str]:
             "pages": re.sub(r"\s+", "", pages),
         }
 
-    for line in search_lines:
-        match = _CITATION_RE.search(line)
+    for candidate in candidates:
+        match = _CITATION_RE.search(candidate)
+        if not match:
+            continue
+        return {
+            "journal_name": _clean_journal_name(match.group("journal")),
+            "year": match.group("year").strip(),
+            "volume": match.group("volume").strip(),
+            "issue": match.group("issue").strip(),
+            "pages": re.sub(r"\s+", "", match.group("pages")),
+        }
+
+    candidates = iter_candidates(search_lines)
+    for candidate in candidates:
+            match = _VOL_NO_PAGES_RE.search(candidate)
+            if not match:
+                continue
+            pages = match.group("pages") or ""
+            return {
+                "journal_name": _clean_journal_name(match.group("journal")),
+                "year": match.group("year").strip(),
+                "volume": match.group("volume").strip(),
+                "issue": match.group("issue").strip(),
+                "pages": re.sub(r"\s+", "", pages),
+            }
+
+    for candidate in candidates:
+        match = _CITATION_RE.search(candidate)
         if not match:
             continue
         return {
@@ -1200,8 +1308,17 @@ def process_pdfs(
 
     for pdf_path in pdfs:
         out_path = txt_out / f"{pdf_path.stem}.txt"
+        meta_path = out_path.with_suffix(".meta.json")
         wrote_txt = False
-        if out_path.exists() and not force:
+
+        needs_extract = force or not out_path.exists()
+        if not needs_extract:
+            try:
+                needs_extract = out_path.stat().st_mtime_ns < pdf_path.stat().st_mtime_ns
+            except FileNotFoundError:
+                needs_extract = True
+
+        if not needs_extract:
             if not csv_out:
                 continue
             raw_text = out_path.read_text(encoding="utf-8-sig", errors="replace")
@@ -1214,7 +1331,43 @@ def process_pdfs(
             wrote_txt = True
 
         cleaned_text = clean_extracted_text(raw_text)
-        metadata = extract_metadata(cleaned_text)
+
+        metadata: dict[str, str] = {}
+        if needs_extract:
+            metadata = extract_metadata(raw_text)
+            try:
+                meta_path.write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            except OSError:
+                pass
+        else:
+            if meta_path.exists():
+                try:
+                    cached = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
+                    if isinstance(cached, dict):
+                        metadata = {str(k): str(v) for k, v in cached.items()}
+                except Exception:
+                    metadata = {}
+
+            if not metadata:
+                metadata = extract_metadata(raw_text)
+
+            if not metadata.get("year") or not metadata.get("journal_name"):
+                pdf_text, meta_extractor = extract_text(pdf_path)
+                metadata = extract_metadata(pdf_text)
+                extractor = f"txt-cache+{meta_extractor}-meta"
+                try:
+                    meta_path.write_text(
+                        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                except OSError:
+                    pass
+
         sections = extract_structured_sections(cleaned_text)
 
         first_author = _extract_first_author(metadata.get("authors", ""))

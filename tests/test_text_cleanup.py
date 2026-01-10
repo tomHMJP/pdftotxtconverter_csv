@@ -63,7 +63,34 @@ References
         sections = extract_structured_sections(cleaned)
         self.assertIn("Line one. Line two.", sections.get("abstract", ""))
 
+    def test_cleanup_removes_corresponding_author_block(self) -> None:
+        raw = """Case Presentation
+A 72-year-old male was referred.
+His family history also includes HS in his two children. The results of
+Corresponding author: Yoshinosuke Shimamura, MD
+Department of Nephrology, Teine Keijinkai Medical Center, 1-12 Maeda, Teine-ku, Sapporo, Hokkaido 006-8555,
+Japan
+E-Mail: yoshinosukeshimamura@gmail.com
+Received for publication 27 November 2014 and accepted in revised form 24 September 2015
+© 2016 Japan Primary Care Association
+Journal of General and Family Medicine
+2016, vol. 17, no. 4, p. 307–310.
+Case Reports
+— 307 —
+
+testing four years before admission reported mild microscopic hematuria.
+References
+1. Example.
+"""
+        cleaned = clean_extracted_text(raw)
+        self.assertIn(
+            "His family history also includes HS in his two children. The results of testing four years before admission reported mild microscopic hematuria.",
+            cleaned,
+        )
+        self.assertNotIn("Corresponding author:", cleaned)
+        self.assertNotIn("E-Mail:", cleaned)
+        self.assertNotIn("Japan Primary Care Association", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()
-
