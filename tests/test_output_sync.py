@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from case_report_pipeline import _output_paths_for_pdf, _sync_txt_outputs  # noqa: E402
+from case_report_pipeline import _output_paths_for_pdf, _sync_txt_outputs, process_pdfs  # noqa: E402
 
 
 class TestOutputSync(unittest.TestCase):
@@ -43,7 +43,23 @@ class TestOutputSync(unittest.TestCase):
             self.assertFalse(stale_meta.exists())
             self.assertTrue(other.exists())
 
+    def test_process_pdfs_empty_with_sync_cleans_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            txt_out = root / "txt"
+            csv_out = root / "out.csv"
+            (txt_out / "stale").mkdir(parents=True, exist_ok=True)
+            stale_txt = txt_out / "stale" / "b.txt"
+            stale_meta = txt_out / "stale" / "b.meta.json"
+            stale_txt.write_text("y", encoding="utf-8")
+            stale_meta.write_text("{}", encoding="utf-8")
+
+            process_pdfs([], root, txt_out, csv_out, force=False, sync_output=True)
+
+            self.assertFalse(stale_txt.exists())
+            self.assertFalse(stale_meta.exists())
+            self.assertTrue(csv_out.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
-

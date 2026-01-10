@@ -26,4 +26,5 @@ exec "$SCRIPT_DIR/.venv/bin/python" case_report_pipeline.py \
   --input "$INPUT_PATH" \
   --txt-out output/txt \
   --csv-out output/case_reports.csv \
+  --sync \
   ${1+"$@"}

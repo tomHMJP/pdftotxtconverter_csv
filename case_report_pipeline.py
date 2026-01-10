@@ -1846,6 +1846,11 @@ def process_pdfs(
     sync_output: bool,
 ) -> None:
     if not pdfs:
+        if csv_out:
+            write_csv([], csv_out)
+            print(csv_out)
+        if sync_output:
+            _sync_txt_outputs(txt_out, set())
         return
 
     txt_out.mkdir(parents=True, exist_ok=True)
@@ -2060,12 +2065,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.watch:
         pdfs = iter_pdfs(args.input)
         if not pdfs:
+            if args.sync_output:
+                process_pdfs([], input_root, args.txt_out, args.csv_out, args.force, True)
+                print(f"No PDFs found under --input: {args.input} (synced outputs)")
+                return 0
             raise SystemExit(
                 f"No PDFs found under --input: {args.input}\n"
                 "Put PDFs in that folder (recursively) or specify a PDF path with --input.\n"
                 "Examples:\n"
                 "  ./run.sh /path/to/pdfs\n"
-                "  ./run.sh /path/to/file.pdf"
+                "  ./run.sh /path/to/file.pdf\n"
+                "Tip: add --sync to also remove stale outputs."
             )
         process_pdfs(pdfs, input_root, args.txt_out, args.csv_out, args.force, args.sync_output)
         return 0
@@ -2078,7 +2088,7 @@ def main(argv: list[str] | None = None) -> int:
             states = _pdf_states(pdfs)
             if last_states is None:
                 last_states = states
-                if pdfs:
+                if pdfs or args.sync_output:
                     process_pdfs(pdfs, input_root, args.txt_out, args.csv_out, args.force, args.sync_output)
             elif states != last_states:
                 last_states = states

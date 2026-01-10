@@ -36,12 +36,8 @@ cd pdftotxtconverter_csv
 
 ※ txt/CSVともに文字化け（Shift-JIS誤判定）を避けるため **UTF-8 with BOM** で出力します。既存txtを同形式で作り直すには `--force` を付けて再実行してください。
 
-過去の出力（txt/meta.json）を入力フォルダと同期して不要ファイルを自動削除したい場合は `--sync` を付けます。
-
-```bash
-./run.sh --sync
-./run.sh /path/to/pdfs --sync
-```
+過去の出力（txt/meta.json）を入力フォルダと同期して不要ファイルを自動削除するには `--sync` を使います。
+（`./run.sh` と `./watch.sh` はデフォルトで `--sync` を有効にしています）
 
 短縮コマンド:
 
