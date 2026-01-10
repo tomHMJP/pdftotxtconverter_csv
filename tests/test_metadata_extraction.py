@@ -62,6 +62,34 @@ References
 Wyatt RJ, Julian BA: IgA nephropathy. N Engl J Med. 2013; 368(25): 2402–2414.
 """
 
+SAMPLE_TEXT_VOL_PAGES_YEAR = """144
+doi: 10.2169/internalmedicine.5419-25
+Intern Med 65: 144-148, 2026
+http://internmed.jp
+【CASE REPORT 】
+Factor V Leiden Mutation Diagnosed After the Onset of
+DVT During Pregnancy in a Woman of
+Half-Japanese, Half-European Descent
+Kazuhiro Shimizu
+1, Masahiro Iwakawa
+1, Yusuke Suzuki
+1 and Takeyoshi Murano
+2
+
+Abstract:
+...
+Case Report
+...
+7.0
+１Department of Internal Medicine, Toho University Sakura Medical Center, Japan and
+２Clinical Laboratory Program, Faculty of Science, Toho
+University, Japan
+Received: February 9, 2025; Accepted: April 22, 2025; Advance Publication by J-STAGE: June 12, 2025
+Correspondence to Dr. Kazuhiro Shimizu, k432@sakura.med.toho-u.ac.jp
+References
+1. Example.
+"""
+
 
 class TestMetadataExtraction(unittest.TestCase):
     def test_extract_metadata_basic_fields(self) -> None:
@@ -122,6 +150,26 @@ class TestMetadataExtraction(unittest.TestCase):
         self.assertIn("Hideki Takizawa", meta["authors"])
         self.assertIn("1) Department of Nephrology", meta["affiliations"])
         self.assertIn("2) Hokkaido Renal Pathology Center", meta["affiliations"])
+
+    def test_extract_metadata_vol_pages_year_style(self) -> None:
+        meta = extract_metadata(SAMPLE_TEXT_VOL_PAGES_YEAR)
+        self.assertEqual(
+            meta["paper_title"],
+            "Factor V Leiden Mutation Diagnosed After the Onset of DVT During Pregnancy in a Woman of Half-Japanese, Half-European Descent",
+        )
+        self.assertEqual(meta["journal_name"], "Intern Med")
+        self.assertEqual(meta["year"], "2026")
+        self.assertEqual(meta["volume"], "65")
+        self.assertEqual(meta["issue"], "")
+        self.assertEqual(meta["pages"], "144-148")
+        self.assertEqual(meta["doi"], "10.2169/internalmedicine.5419-25")
+        self.assertIn("Kazuhiro Shimizu", meta["authors"])
+        self.assertIn("Masahiro Iwakawa", meta["authors"])
+        self.assertIn("Yusuke Suzuki", meta["authors"])
+        self.assertIn("Takeyoshi Murano", meta["authors"])
+        self.assertNotIn("Half-European", meta["authors"])
+        self.assertIn("1) Department of Internal Medicine", meta["affiliations"])
+        self.assertIn("2) Clinical Laboratory Program", meta["affiliations"])
 
 
 if __name__ == "__main__":
