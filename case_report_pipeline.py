@@ -53,7 +53,14 @@ def iter_pdfs(input_path: Path) -> list[Path]:
     if not input_path.is_dir():
         raise FileNotFoundError(f"--input not found: {input_path}")
 
-    return sorted(input_path.rglob("*.pdf"))
+    pdfs: list[Path] = []
+    for path in input_path.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() != ".pdf":
+            continue
+        pdfs.append(path)
+    return sorted(pdfs)
 
 
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE)
@@ -1443,7 +1450,13 @@ def main(argv: list[str] | None = None) -> int:
     if not args.watch:
         pdfs = iter_pdfs(args.input)
         if not pdfs:
-            raise SystemExit("No PDFs found.")
+            raise SystemExit(
+                f"No PDFs found under --input: {args.input}\n"
+                "Put PDFs in that folder (recursively) or specify a PDF path with --input.\n"
+                "Examples:\n"
+                "  ./run.sh /path/to/pdfs\n"
+                "  ./run.sh /path/to/file.pdf"
+            )
         process_pdfs(pdfs, args.txt_out, args.csv_out, args.force)
         return 0
 

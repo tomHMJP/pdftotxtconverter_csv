@@ -17,7 +17,7 @@
 ### 最短セットアップ（推奨）
 
 ```bash
-cd case-report-pdf-pipeline
+cd pdftotxtconverter_csv
 ./bootstrap.sh
 ```
 
@@ -39,7 +39,9 @@ cd case-report-pdf-pipeline
 短縮コマンド:
 
 ```bash
-./run.sh
+./run.sh                 # input_pdfs/ を処理（デフォルト）
+./run.sh /path/to/pdfs   # 任意のフォルダを処理
+./run.sh /path/to/a.pdf  # PDF 1本だけ処理
 ```
 
 ### 自動化（フォルダ監視）
@@ -83,6 +85,6 @@ txt/CSV の `full_text` は、PDF由来の「無駄な改行」や `suggest-\nin
 ## テスト（任意）
 
 ```bash
-cd case-report-pdf-pipeline
+cd pdftotxtconverter_csv
 python3 -m unittest discover -s tests
 ```
